@@ -2,11 +2,9 @@
 #
 # This file is part of restkit released under the MIT license.
 # See the NOTICE for more information.
-from webob import exc
-from webob.compat import PY3, url_quote
+from urllib.parse import quote as url_quote
 import logging
 import socket
-import six
 import re
 
 try:
@@ -31,6 +29,21 @@ WEBOB_ERROR = (
     "header to the correct value before forwarding your request to the "
     "proxy: ``req.content_length = str(len(req.body));`` "
     "req.get_response(proxy)")
+
+class HttpError:
+    def __init__(self, status_code, title, response_msg):
+        self.status = "{} {}".format(status_code, title)
+        self.response_body = response_msg
+
+    def __call__(self, environ, start_response):
+        response_headers = [
+            ('Content-Type', 'text/plain'),
+            ('Content-Length', str(len(self.response_body)))
+        ]
+
+        start_response(self.status, response_headers)
+
+        return [bytes(self.response_body, 'utf-8')]
 
 
 def rewrite_location(host_uri, location, prefix_path=None):
@@ -144,7 +157,9 @@ class Proxy(object):
         method = environ['REQUEST_METHOD']
         if (self.allowed_methods is not None and
                 method not in self.allowed_methods):
-                return exc.HTTPMethodNotAllowed()(environ, start_response)
+                resp = HttpError(405, 
+                    "Method Not Allowed", "{} not allowed".format(method))
+                return resp(environ, start_response)
 
         if 'RAW_URI' in environ:
             path_info = environ['RAW_URI']
@@ -157,8 +172,7 @@ class Proxy(object):
                 path_info = environ['SCRIPT_NAME']
             path_info += environ['PATH_INFO']
 
-            if PY3:
-                path_info = url_quote(path_info.encode('latin-1'),
+            path_info = url_quote(path_info.encode('latin-1'),
                                       LOW_CHAR_SAFE)
 
             query_string = environ['QUERY_STRING']
@@ -191,18 +205,22 @@ class Proxy(object):
             new_headers['Content-Length'] = content_length
 
         if new_headers.get('Content-Length', '0') == '-1':
-            resp = exc.HTTPInternalServerError(detail=WEBOB_ERROR)
+            resp = HttpError(500, "Internal Server Error", WEBOB_ERROR)
             return resp(environ, start_response)
 
         try:
             response = self.process_request(uri, method, new_headers, environ)
         except socket.timeout:
-            return exc.HTTPGatewayTimeout()(environ, start_response)
+            resp = HttpError(504, "Gateway Timeout", "Gateway Timed Out")
+            return resp(environ, start_response)
         except (socket.error, socket.gaierror):
-            return exc.HTTPBadGateway()(environ, start_response)
+            resp = HttpError(502, "Bad Gateway", "Bad Gateway")
+            return resp(environ, start_response)
         except Exception as e:
             self.logger.exception(e)
-            return exc.HTTPInternalServerError()(environ, start_response)
+            resp = HttpError(500, "Internal Server Error", 
+                "Internal Server Error")
+            return resp(environ, start_response)
 
         status, location, headerslist, app_iter = response
 
@@ -226,7 +244,7 @@ class Proxy(object):
         start_response(status, headers)
 
         if method == "HEAD":
-            return [six.b('')]
+            return [b'']
 
         return app_iter
 
